@@ -7,6 +7,9 @@ import itertools
 from multiprocessing import Pool, cpu_count
 from numpy import mean
 import time
+import humanize
+
+from numpy.core.defchararray import endswith
 
 """
 To change counting (balanced/unbalanced):
@@ -41,35 +44,77 @@ Dragon unbalanced starting count returns (units/shoe) based on 320 million shoes
 Balanced: 0.71
 """
 
+SIDE_BETS = {
+    'dragon': {
+        'payout': 40,
+        'starting_count': -32,
+        'trigger_count': 0,
+        'tags': [0, 1, 0, 0, -1, -1, -1, -1, 2, 2],
+        'conditions': (
+            (-1, -1, 3, 7, "Banker"),
+        )
+    },
+    'two_card_9_7': {
+        'payout': 50,
+        'starting_count': -34,
+        'trigger_count': 0,
+        'tags': [1, 1, 1, 1, 1, 1, 1, -5, 1, -5],
+        'conditions': (
+            (2, 9, 2, 7, "Player"),
+            (2, 7, 2, 9, "Banker")
+        )
+    },
+    'three_card_9_7': {
+        'payout': 200,
+        'starting_count': -34,
+        'trigger_count': 0,
+        # 'tags': [1, 1, 0, 0, -1, -2, -1, -2, 1, 1], #original tags
+        'tags': [0, 1, 0, 0, -1, -1, -1, -1, 2, 2], #dragon tags
+        'conditions': (
+            (3, 9, 3, 7, "Player"),
+            (3, 7, 3, 9, "Banker")
+        )
+    }
+}
+
+def build_side_bet_dictionary(dictionary : dict):
+    side_bet_dict = {}
+    for bet in SIDE_BETS:
+        for condition in SIDE_BETS[bet]['conditions']:
+            p_cards = [2,3] if condition[0] == -1 else [condition[0]]
+            p_totals = list(range(0, condition[3])) if condition[1] == -1 else [condition[1]]
+            b_cards = [2, 3] if condition[2] == -1 else [condition[2]]
+            b_totals = list(range(0, condition[1])) if condition[3] == -1 else [condition[3]]
+            for i in p_cards:
+                for j in p_totals:
+                    for k in b_cards:
+                        for l in b_totals:
+                            side_bet_dict[(i, j, k, l, condition[4])] = bet
+
+    return side_bet_dict
+
+side_bet_dictionary = build_side_bet_dictionary(SIDE_BETS)
 
 class Shoe():
     def __init__(self):
         self.shoe = self.make_shoe()
 
+        self.hands = 0  # 6
         self.player_wins = 0  # 0
         self.banker_wins = 0  # 1
         self.ties = 0  # 2
         self.dragon_wins = 0  # 3
-        self.two_card_97 = 0  # 4
-        self.three_card_97 = 0  # 5
-        self.hands = 0  # 6
 
-        self.dragon_count = -32
-        # self.dragon_count = 0
-        self.dragon_bets = 0  # 7
-        self.dragon_bets_won = 0  # 8
+        self.side_bet_counts = {}
 
-        self.two_card_97_count = -34
-        # self.two_card_97_count = 0
-        self.two_card_97_bets = 0  # 9
-        self.two_card_97_bets_won = 0  # 10
-
-        self.three_card_97_count = -34
-        self.three_card_97_bets = 0  # 11
-        self.three_card_97_bets_won = 0  # 12
+        for side_bet in SIDE_BETS:
+            self.side_bet_counts[f'{side_bet}_count'] = SIDE_BETS[side_bet]['starting_count']
+            setattr(self, f"{side_bet}_wins", 0)
+            setattr(self, f"{side_bet}_bets", 0)
+            setattr(self, f"{side_bet}_bets_won", 0)
 
     def make_shoe(self):
-        deck = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, ] * 4
+        deck = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0] * 4
         shoe = deque(deck * 8)  # 6-deck shoe
         random.shuffle(shoe)
         return shoe
@@ -83,36 +128,36 @@ class Shoe():
     def draw(self, hand):
         hand.append(self.shoe.popleft())
 
-    def deal_cards(self, Player, Banker):
+    def deal_cards(self, player_cards, banker_cards):
         for _ in range(2):
-            self.draw(Player)
-            self.draw(Banker)
+            self.draw(player_cards)
+            self.draw(banker_cards)
 
-    def calculate_hand_value(self, Player, Banker):
-        Player_value = sum(Player) % 10
-        Banker_value = sum(Banker) % 10
-        return (Player_value, len(Player)), (Banker_value, len(Banker))
+    def calculate_hand_value(self, player_cards, banker_cards):
+        Player_value = sum(player_cards) % 10
+        Banker_value = sum(banker_cards) % 10
+        return (Player_value, len(player_cards)), (Banker_value, len(banker_cards))
 
-    def check_natural(self, Player, Banker):
-        P_tuple, B_tuple = self.calculate_hand_value(Player, Banker)
-        if (P_tuple[1] == 2 and 8 <= P_tuple[0] <= 9) or (B_tuple[1] == 2 and 8 <= B_tuple[0] <= 9):
+    def check_natural(self, player_cards, banker_cards):
+        P_tuple, B_tuple = self.calculate_hand_value(player_cards, banker_cards)
+        if (P_tuple[1] == 2 and 8 <= P_tuple[0] <= 9) or  (B_tuple[1] == 2 and 8 <= B_tuple[0] <= 9):
             return True
         return False
 
-    def Player_play(self, Player):
-        if sum(Player) % 10 <= 5:
-            self.draw(Player)
+    def player_play(self, player_cards):
+        if sum(player_cards) % 10 <= 5:
+            self.draw(player_cards)
 
-    def Banker_play(self, Player, Banker):
-        P_tuple, B_tuple = self.calculate_hand_value(Player, Banker)
+    def banker_play(self, player_cards, banker_cards):
+        player_tuple, banker_tuple = self.calculate_hand_value(player_cards, banker_cards)
 
-        if B_tuple[0] >= 7:
+        if banker_tuple[0] >= 7:
             return
-        elif P_tuple[1] == 2 and B_tuple[0] <= 5:
-            self.draw(Banker)
+        elif player_tuple[1] == 2 and banker_tuple[0] <= 5:
+            self.draw(banker_cards)
             return
-        elif P_tuple[1] == 3:
-            P_3rd = Player[2]
+        elif player_tuple[1] == 3:
+            P_3rd = player_cards[2]
             draw_check = {
                 0: True,
                 1: True,
@@ -122,32 +167,22 @@ class Shoe():
                 5: True if 4 <= P_3rd <= 7 else False,
                 6: True if 6 <= P_3rd <= 7 else False
             }
-            if draw_check.get(B_tuple[0], False):
-                self.draw(Banker)
+            if draw_check.get(banker_tuple[0], False):
+                self.draw(banker_cards)
 
-    def pay_main(self, Player, Banker):
-        P_tuple, B_tuple = self.calculate_hand_value(Player, Banker)
-        if P_tuple[0] > B_tuple[0]:
-            # print(f"Player wins with a {P_tuple[1]}-card {P_tuple[0]} against a Banker {B_tuple[1]}-card {B_tuple[0]}!")
+    def pay_main(self, player_cards, banker_cards):
+        player_tuple, banker_tuple = self.calculate_hand_value(player_cards, banker_cards)
+        if player_tuple[0] > banker_tuple[0]:
             self.player_wins += 1
-        elif B_tuple[0] > P_tuple[0] and not (B_tuple[0] == 7 and B_tuple[1] == 3):
-            # print(f"Banker wins with a {B_tuple[1]}-card {B_tuple[0]} against a Player {P_tuple[1]}-card {P_tuple[0]}!")
+        elif banker_tuple[0] > player_tuple[0] and not (banker_tuple[0] == 7 and banker_tuple[1] == 3):
             self.banker_wins += 1
-        elif B_tuple[0] == P_tuple[0]:
-            """
-            This must go before dragon is computed, 
-            or else an additional condition will have to be 
-            checked in checking the dragon win in order to ensure
-            that it is not a tie (2-card player 7 v. 3-card banker 7)
-            """
-            # print(f"Tie with a Player {P_tuple[1]}-card {P_tuple[0]} and a Banker {B_tuple[1]}-card {B_tuple[0]}!")
+        elif banker_tuple[0] == player_tuple[0]:
             self.ties += 1
-        elif B_tuple[0] == 7 and B_tuple[1] == 3:
-            # print(f"Dragon wins with a {B_tuple[1]}-card {B_tuple[0]} against a Player {P_tuple[1]}-card {P_tuple[0]}!")
+        elif banker_tuple[0] == 7 > player_tuple[0] and banker_tuple[1] == 3:
             self.dragon_wins += 1
             return True
         else:
-            raise Exception(f"No hand categorization found. Player: {P_tuple}, Banker: {B_tuple}")
+            raise Exception(f"No hand categorization found. Player: {player_tuple}, Banker: {banker_tuple}")
 
     # def check_correctness(self, Player, Banker):
     #     if (len(Player) == 3 or len(Banker) == 3) and (8 <= sum(Player[:2]) % 10 <= 9 or 8 <= sum(Banker[:2]) % 10 <= 9):
@@ -170,126 +205,70 @@ class Shoe():
     #             elif sum(Banker[:2]) % 10 in [7, 8, 9]:
     #                 raise Exception(f"Banker draw error. Player: {Player}, Banker: {Banker}")
 
-    def update_dragon_count(self, Player, Banker):
-        cards = Player + Banker
-        for card in cards:
-            if card == 1:
-                self.dragon_count += 1
-                # self.dragon_count += 0
-            elif card in [4, 5, 6, 7]:
-                self.dragon_count -= 1
-            elif card in [8, 9]:
-                self.dragon_count += 2
+    def update_side_bet_counts(self, player_cards, banker_cards):
+        cards = player_cards + banker_cards
+        for side_bet in self.side_bet_counts:
+            for card in cards:
+                self.side_bet_counts[side_bet] += SIDE_BETS[side_bet.removesuffix("_count")]['tags'][card]
 
-    def play_dragon(self):
-        if self.dragon_count >= 0:
-            return True
-        return False
-        #
-        #
-        # true_count = self.dragon_count / (len(self.shoe)/52)
-        # if true_count >= 4:
-        #     return True
-        # return False
+    def play_side_bets(self):
+        side_bets = []
+        for side_bet in self.side_bet_counts:
+            side_bet_name = side_bet.removesuffix("_count")
+            if self.side_bet_counts[side_bet] >= SIDE_BETS[side_bet_name]['trigger_count']:
+                side_bets.append(side_bet_name)
+                setattr(self, f"{side_bet_name}_bets", getattr(self, f"{side_bet_name}_bets") + 1)
+        return side_bets
 
-    def update_two_card_97_count(self, Player, Banker):
-        cards = Player + Banker
-        for card in cards:
-            if card in [1, 2, 3, 4, 5, 6, 8, 0]:  # adjusted 1 to add 1 for unbalanced count
-                self.two_card_97_count += 1
-            elif card in [7, 9]:
-                self.two_card_97_count -= 5
+    def pay_side_bets(self, player_cards, banker_cards, side_bets_played):
+        player_tuple, banker_tuple = self.calculate_hand_value(player_cards, banker_cards)
+        if player_tuple[0] > banker_tuple[0]:
+            winner = "Player"
+        elif banker_tuple[0] > player_tuple[0]:
+            winner = "Banker"
+        else:
+            winner = "Tie"
 
-    def play_two_card_97(self):
-        if self.two_card_97_count >= 0:
-            return True
-        return False
-        #
-        # true_count = self.two_card_97_count / (len(self.shoe)/52)
-        # if true_count >= 6:
-        #     return True
-        # return False
+        hand_signature = (player_tuple[1], player_tuple[0], banker_tuple[1], banker_tuple[0], winner)
+        side_bet = side_bet_dictionary.get(hand_signature, False)
 
-    def update_three_card_97_count(self, Player, Banker):
-        cards = Player + Banker
-        for card in cards:
-            if card in [1, 8, 0, 9]:  # 9, 2, 3
-                self.three_card_97_count += 1
-            elif card in [4, 6]:
-                self.three_card_97_count -= 1
-            elif card in [5, 7]:
-                self.three_card_97_count -= 2
+        if side_bet in side_bets_played:
+            setattr(self, f"{side_bet}_bets_won", getattr(self, f"{side_bet}_bets_won") + 1)
 
-    def play_three_card_97(self):
-        if self.three_card_97_count >= 0:
-            return True
-        return False
+        if side_bet not in ["dragon", False]:
+            setattr(self, f"{side_bet}_wins", getattr(self, f"{side_bet}_wins") + 1)
 
-        # true_count = self.three_card_97_count / (len(self.shoe) / 52)
-        # if true_count >= 5:
-        #     return True
-        # return False
 
-    def pay_sides(self, Player, Banker, sides):
-        P_tuple, B_tuple = self.calculate_hand_value(Player, Banker)
-        if B_tuple[0] == 7 and B_tuple[1] == 3 and B_tuple[0] > P_tuple[0] and sides[0] == True:
-            # print(f"Dragon wins with a {B_tuple[1]}-card {B_tuple[0]} against a Player {P_tuple[1]}-card {P_tuple[0]}!")
-            self.dragon_bets_won += 1
-        if ((B_tuple[0] == 7 and P_tuple[0] == 9) or (B_tuple[0] == 9 and P_tuple[0] == 7)) and B_tuple[1] == 2 and \
-                P_tuple[1] == 2:
-            if sides[1] == True:
-                self.two_card_97_bets_won += 1
-            self.two_card_97 += 1
-        if ((B_tuple[0] == 7 and P_tuple[0] == 9) or (B_tuple[0] == 9 and P_tuple[0] == 7)) and B_tuple[1] == 3 and \
-                P_tuple[1] == 3:
-            if sides[2] == True:
-                self.three_card_97_bets_won += 1
-            self.three_card_97 += 1
-
-    def end_game(self, Player, Banker, sides):
-        self.pay_main(Player, Banker)
-        self.pay_sides(Player, Banker, sides)
-        self.update_dragon_count(Player, Banker)
-        self.update_two_card_97_count(Player, Banker)
-        self.update_three_card_97_count(Player, Banker)
+    def end_game(self, player_cards, banker_cards, sides):
+        self.pay_main(player_cards, banker_cards)
+        self.pay_side_bets(player_cards, banker_cards, sides)
+        self.update_side_bet_counts(player_cards, banker_cards)
         # self.check_correctness(Player, Banker)
         self.hands += 1
 
     def play(self):
-        side_bets = [False] * 3
+        side_bets = self.play_side_bets()
 
-        if self.play_dragon():
-            side_bets[0] = True
-            self.dragon_bets += 1
+        player_cards = []
+        banker_cards = []
+        self.deal_cards(player_cards, banker_cards)
 
-        if self.play_two_card_97():
-            side_bets[1] = True
-            self.two_card_97_bets += 1
-
-        if self.play_three_card_97():
-            side_bets[2] = True
-            self.three_card_97_bets += 1
-
-        Player = []
-        Banker = []
-        self.deal_cards(Player, Banker)
-
-        if self.check_natural(Player, Banker):
-            self.end_game(Player, Banker, side_bets)
+        if self.check_natural(player_cards, banker_cards):
+            self.end_game(player_cards, banker_cards, side_bets)
             return
 
-        self.Player_play(Player)
-        self.Banker_play(Player, Banker)
+        self.player_play(player_cards)
+        self.banker_play(player_cards, banker_cards)
 
-        self.end_game(Player, Banker, side_bets)
+        self.end_game(player_cards, banker_cards, side_bets)
 
     def play_shoe(self):
         while not self.shoe_complete():
             self.play()
-        return (self.player_wins, self.banker_wins, self.ties, self.dragon_wins,
-                self.two_card_97, self.three_card_97, self.hands, self.dragon_bets,
-                self.dragon_bets_won, self.two_card_97_bets, self.two_card_97_bets_won, self.three_card_97_bets,
-                self.three_card_97_bets_won)
+        # return (self.player_wins, self.banker_wins, self.ties, self.dragon_wins,
+        #         self.two_card_9_7, self.three_card_9_7, self.hands, self.dragon_bets,
+        #         self.dragon_bets_won, self.two_card_9_7_bets, self.two_card_9_7_bets_won, self.three_card_9_7_bets,
+        #         self.three_card_9_7_bets_won)
         # print(self.shoe)
 
         # draw cards
@@ -301,143 +280,112 @@ class Shoe():
 class Simulation():
     def __init__(self, shoes):
         self.shoes = shoes
-
-        self.player_total = 0
-        self.banker_total = 0
-        self.tie_total = 0
-        self.dragon_total = 0
-        self.two_card_97_total = 0
-        self.three_card_97_total = 0
-        self.hands_total = 0
-
-        self.dragon_bets_total = 0
-        self.dragon_bets_won_total = 0
-
-        self.two_card_97_bets_total = 0
-        self.two_card_97_bets_won_total = 0
-
-        self.three_card_97_bets_total = 0
-        self.three_card_97_bets_won_total = 0
+        temp_instance = Shoe()
+        for attr in vars(temp_instance):
+            if not attr.endswith("_counts") and attr != 'shoe':
+                setattr(self, attr, 0)
 
     def run_simulation(self):
         for _ in range(self.shoes):
             shoe = Shoe()
-            result = shoe.play_shoe()
+            shoe.play_shoe()
 
-            self.player_total += result[0]
-            self.banker_total += result[1]
-            self.tie_total += result[2]
-            self.dragon_total += result[3]
-            self.two_card_97_total += result[4]
-            self.three_card_97_total += result[5]
-            self.hands_total += result[6]
+            for attr in [var for var in vars(self) if var != 'shoes']:
+                self.__dict__[attr] += shoe.__dict__[attr]
 
-            self.dragon_bets_total += result[7]
-            self.dragon_bets_won_total += result[8]
-
-            self.two_card_97_bets_total += result[9]
-            self.two_card_97_bets_won_total += result[10]
-
-            self.three_card_97_bets_total += result[11]
-            self.three_card_97_bets_won_total += result[12]
-
-    def compute_data(self):
-        # print(f"Player {self.player_total/self.hand_total} ({self.player_total}/{self.hand_total})")
-        # print(f"Banker {self.banker_total/self.hand_total} ({self.banker_total}/{self.hand_total})")
-        # print(f"Tie {self.tie_total/self.hand_total} ({self.tie_total}/{self.hand_total})")
-        # print(f"Dragon {self.dragon_total/self.hand_total} ({self.dragon_total}/{self.hand_total})")
-        # print(f"Hands {self.hand_total/self.hand_total} ({self.hand_total}/{self.hand_total})")
-
-        return [self.player_total, self.banker_total, self.tie_total, self.dragon_total, self.two_card_97_total,
-                self.three_card_97_total, self.hands_total, self.dragon_bets_total, self.dragon_bets_won_total,
-                self.two_card_97_bets_total, self.two_card_97_bets_won_total, self.three_card_97_bets_total,
-                self.three_card_97_bets_won_total]
-
-
-def multi_function(_):
+def main_function(_):
     sim = Simulation(1000000)
     sim.run_simulation()
-    return sim.compute_data()
-
+    return vars(sim)
 
 def run_simulation_n_times(n):
     with multiprocessing.Pool() as pool:
-        results = pool.map(multi_function, range(n))
-    return np.array(results)
+        simulation_results = pool.map(main_function, range(n))
 
+    return_results = {}
+
+    for result in simulation_results:
+        for key, value in result.items():
+            if key in return_results:
+                return_results[key] += value
+            else:
+                return_results[key] = value
+
+    return return_results
+
+
+def print_results(results, elapsed):
+    # Calculate the maximum length of the keys (with formatting) to align them to the right
+    key_width = 1 + max(len(key.capitalize().replace('_', ' ')) for key in results.keys()
+                    if not key.endswith('_bets') and not key.endswith('_bets_won') and key not in ['shoes', 'hands'])
+
+    # Print the predefined results with proper alignment
+    print(f"=======Baccarat Monte Carlo Simulation Results=======")
+
+    print(f"{'Shoes:':>{key_width}} {humanize.intword(results['shoes'])}")
+    print(f"{'Hands:':>{key_width}} {humanize.intword(results['hands'])}")
+    print(f"{'Completed in:':>{key_width}} {elapsed}s")
+
+    print("")
+
+    # Calculate the maximum width of the fraction for proper alignment of the closing parenthesis
+    max_fraction_width = max(len(f"{value}/{results['hands']}") for key, value in results.items()
+                            if not key.endswith('_bets') and not key.endswith('_bets_won') and key not in ['shoes', 'hands'])
+
+    # Find the maximum length of the formatted keys to align the parentheses
+    for key, value in results.items():
+        if not key.endswith("_bets") and not key.endswith("_bets_won") and key not in ['shoes', 'hands']:
+            # Capitalize and replace underscores with spaces in the key
+            formatted_key = key.capitalize().replace('_', ' ')
+            # Format the value as a percentage
+            value_percentage = value / results['hands'] * 100
+            value_str = f"{value}/{results['hands']}"
+
+            # Print the key and the formatted result with alignment for the closing parenthesis
+            print(f"{formatted_key + ':':>{key_width}} {value_percentage:>6.2f}%    ({value_str:>{max_fraction_width}})")
+
+    print("")
+    for side_bet in SIDE_BETS:
+        bets = results[f'{side_bet}_bets']
+        bets_won = results[f'{side_bet}_bets_won']
+        bets_lost = bets - bets_won
+
+        bet_payout = SIDE_BETS[side_bet]['payout']
+        bet_return = bets_lost * -1 + bets_won * bet_payout
+        bet_return_units_per_shoe = bet_return / results['shoes']
+
+        if bet_return_units_per_shoe > 0:
+            bet_return_units_per_shoe_string = f"+{bet_return_units_per_shoe:.3f}"
+        else:
+            bet_return_units_per_shoe_string = f"{bet_return_units_per_shoe}"
+
+        side_bet_name = side_bet.capitalize().replace('_', ' ')
+
+        bets_percentage = bets / results['hands'] * 100
+        bets_fraction_string = f"{bets}/{results['hands']}"
+
+        bets_won_percentage = bets_won / bets * 100
+        bets_won_percentage_string = f"{bets_won}/{bets}"
+
+        print(f"{side_bet_name + ':':>{key_width}} {bet_return_units_per_shoe_string:>7} {'units per shoe':>17}")
+        print(f"{'Bets:':>{key_width}} {bets_percentage:>6.2f}%    ({bets_fraction_string:>{max_fraction_width}})")
+        print(f"{'Bets won:':>{key_width}} {bets_won_percentage:>6.2f}%    ({bets_won_percentage_string:>{max_fraction_width}})")
+        print(f"{'Tags (0-9):':>{key_width}} {SIDE_BETS[side_bet]['tags']}")
+
+        print("")
+        # print(f"{side_bet_name} units won per shoe: {bet_return_units_per_shoe}")
+
+
+#bets
+#bets won
 
 if '__main__' == __name__:
+    # main = main_function(None)
+    # print(vars(main))
     start = time.time()
     results = run_simulation_n_times(32)
     end = time.time()
-    combined = results.sum(axis=0)
-    shoes = 1000000 * 32
-
-    player = combined[0]
-    banker = combined[1]
-    tie = combined[2]
-    dragon = combined[3]
-    two_card_97 = combined[4]
-    three_card_97 = combined[5]
-    hands = combined[6]
-
-    dragon_bets = combined[7]
-    dragon_bets_won = combined[8]
-
-    two_card_97_bets = combined[9]
-    two_card_97_bets_won = combined[10]
-
-    three_card_97_bets = combined[11]
-    three_card_97_bets_won = combined[12]
-
-    dragon_bets_lost = dragon_bets - dragon_bets_won
-    dragon_profit = dragon_bets_lost * -1 + dragon_bets_won * 40
-    dragon_units_per_shoe = dragon_profit / shoes
-
-    two_card_97_bets_lost = two_card_97_bets - two_card_97_bets_won
-    two_card_97_profit = two_card_97_bets_lost * -1 +  two_card_97_bets_won * 50
-    two_card_97_units_per_shoe = two_card_97_profit / shoes
-
-    three_card_97_bets_lost = three_card_97_bets - three_card_97_bets_won
-    three_card_97_profit = three_card_97_bets_lost * -1 + three_card_97_bets_won * 200
-    three_card_97_units_per_shoe = three_card_97_profit / shoes
-
-    print(f"Number of shoes simulated: {shoes:,}")
-    print(f"Simulation completed in {end - start:.2f}s")
-
-    print("")
-    print(f"Player {player/hands} ({player}/{hands})")
-    print(f"Banker {banker/hands} ({banker}/{hands})")
-    print(f"Tie {tie/hands} ({tie}/{hands})")
-    print(f"Dragon {dragon/hands} ({dragon}/{hands})")
-    print(f"2-card 9/7 {two_card_97/hands} ({two_card_97}/{hands})")
-    print(f"3-card 9/7 {three_card_97/hands} ({three_card_97}/{hands})")
-
-    print("")
-
-    print(f"Dragon bets {dragon_bets/hands} ({dragon_bets}/{hands})")
-    print(f"Dragon bets won {dragon_bets_won/dragon_bets} ({dragon_bets_won}/{dragon_bets})")
-    print(f"Dragon units won per shoe {dragon_units_per_shoe}")
-
-    print("")
-
-    print(f"2-card 9/7 bets {two_card_97_bets/hands} ({two_card_97_bets}/{hands})")
-    print(f"2-card 9/7 bets won {two_card_97_bets_won/two_card_97_bets} ({two_card_97_bets_won}/{two_card_97_bets})")
-    print(f"2-card 9/7 units won per shoe {two_card_97_units_per_shoe}")
-
-    print("")
-
-    print(f"3-card 9/7 bets {three_card_97_bets/hands} ({three_card_97_bets}/{hands})")
-    print(f"3-card 9/7 bets won {three_card_97_bets_won/three_card_97_bets} ({three_card_97_bets_won}/{three_card_97_bets})")
-    print(f"3-card 9/7 units won per shoe {three_card_97_units_per_shoe}")
-
-    # print(f"Dragon bets {combined[6]/combined[5]} ({combined[6]}/{combined[5]})")
-    # print(f"Dragon bets won {combined[7]/combined[6]} ({combined[7]}/{combined[6]})")
-    # print(f"Dragon units won per shoe {dragon_units_per_shoe}")
-    # print("")
-    # print(f"3-card 9/7 bets {combined[8]/combined[5]} ({combined[8]}/{combined[5]})")
-    # print(f"3-card 9/7 bets won {combined[9]/combined[8]} ({combined[9]}/{combined[8]})")
-    # print(f"3-card 9/7 units won per shoe {three_card_97_units_per_shoe}")
-
+    elapsed = end - start
+    print_results(results, elapsed)
 
 
